@@ -1,0 +1,274 @@
+rm(list=ls())
+
+##
+library('readxl') #read excel
+library('dplyr') #groupby and filter
+library('tidyr')
+library('tidytext')
+library('textdata')
+library('ggplot2') #ggplot
+library('purrr') #map function
+
+## DATA IMPORT
+
+data <- read_excel('data2archive.xlsx') 
+#View(data)
+
+
+## SELECTING TWEETS
+```{r}
+raw_tweets <- data %>% select(from_user, text)
+head(raw_tweets)
+```
+
+## USING TOKENS FUNCTION TO REMOVE "RT", CONVERT TO LOWERCASE, REMOVE PUNCTUATION
+```{r}
+
+raw_tweets$raw_tweets_noLink <- gsub("https://t.co/", "", raw_tweets$text)
+raw_tweets$raw_tweets_noRT <- gsub("RT", "", raw_tweets$raw_tweets_noLink)
+
+raw_tweets_stem <- raw_tweets %>% 
+  select(raw_tweets_noRT) %>%
+  unnest_tokens(word, raw_tweets_noRT)
+
+head(raw_tweets_stem)
+
+cleaned_tweets <- raw_tweets_stem %>%
+  anti_join(stop_words)
+
+head(cleaned_tweets)
+```
+
+## TOP 15 WORDS
+```{r}
+cleaned_tweets %>%
+  count(word, sort = TRUE) %>%
+  top_n(15) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(x = word, y = n, fill = word)) + geom_col() + xlab(NULL) + coord_flip () + theme_light() + 
+  labs(x = "Count", y = "Unique Words")
+```
+
+#BING SENTIMENT ANALYSIS - RETURN "POSITIVE" OR "NEGATIVE"
+```{r}
+bing_SA <- cleaned_tweets %>% 
+  inner_join(get_sentiments("bing")) %>% 
+  count(word, sentiment, sort = TRUE) %>% 
+  ungroup()
+bing_SA
+```
+
+#BING SENTIMENT ANALYSIS - GROUP BY SENTIMENT
+```{r}
+bing_SA %>%
+  group_by(sentiment) %>%
+  top_n(15) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(x = word, y = n, fill = sentiment)) + geom_col(show.legend = FALSE) + 
+  facet_wrap(~sentiment, scales= "free_y") + 
+  labs(x = NULL, y = "Contribution to Sentiment") + 
+  coord_flip () + theme_light()
+```
+
+#AFINN SENTIMENT ANALYSIS - RETURN SCORE (NUMERICAL VALUE)
+```{r}
+afinn_SA <- cleaned_tweets %>% 
+  inner_join(get_sentiments("afinn")) %>% 
+  count(word, value, sort = TRUE) %>% 
+  ungroup()
+afinn_SA
+```
+
+#AFINN SENTIMENT ANALYSIS - GROUP BY SENTIMENT
+```{r}
+afinn_SA %>%
+  group_by(value) %>%
+  top_n(5) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(x = word, y = n, fill = value)) + geom_col(show.legend = FALSE) + 
+  facet_wrap(~value, scales= "free_y") + 
+  labs(x = NULL, y = "Contribution to Sentiment") + 
+  coord_flip () + theme_light()
+```
+
+#GETTING SETNIMENT SCORE (BING) FOR EACH TWEET - CREATING FUNCTION
+```{r}
+sentiment_bing = function(twt) {
+  #Step 1: Basic Cleaning
+  twt_tbl = tibble(text = twt) %>%
+    mutate(
+      filteredRT = gsub(("RT"), "", text),
+      stripped_text = gsub(("https://t.co/"), "", filteredRT)
+    ) %>%
+    unnest_tokens(word, stripped_text) %>%
+    anti_join(stop_words) %>%
+    inner_join(get_sentiments("bing")) %>%
+    count(word, sentiment, sort = TRUE) %>%
+    ungroup() %>%
+  
+  #Step 2: Create Column "score" that assigns a -1 to all negative words, and 1 to positive words
+    mutate(
+      score = case_when(
+        sentiment == "negative" ~ n*(-1),
+        sentiment == "positive" ~ n*(1)
+      )
+    )
+  
+  #Step 3: Calculate total score
+  sent.score = case_when(
+    nrow(twt_tbl) == 0 ~ 0,
+    nrow(twt_tbl) > 0 ~ sum(twt_tbl$score)
+  )
+  
+  #Step 4: Keep track of which tweets contained no words from the Bing list
+  zero.type = case_when(
+    nrow(twt_tbl) == 0 ~ "Type 1",
+    nrow(twt_tbl) > 0 ~ "Type 2"
+  )
+  list(score = sent.score, type = zero.type, twt_tbl = twt_tbl)
+}
+```
+
+#GETTING SENTIMENT SCORE (BING) FOR EACH TWEET - APPLYING FUNCTION
+```{r}
+applied_sentiment_bing <- lapply(raw_tweets$text, function(x){sentiment_bing(x)}) 
+#Will take some time
+
+#applied_sentiment -> DONT RUN THIS, IT WILL MAKE YOUR PC LAG
+```
+
+#TESTING A TWEET - BING
+```{r}
+applied_sentiment_bing[[2022]]
+raw_tweets$text[2022]
+```
+
+#MAKING A HISTOGRAM - BING
+```{r}
+sentiment_final_bing <- bind_rows(
+  tibble(
+    score = unlist(map(applied_sentiment_bing, "score")),
+    type = unlist(map(applied_sentiment_bing, "type"))
+  )
+)
+sentiment_final_bing
+
+sentimental_table_bing <- bind_rows(
+  tibble(
+    sentiment = c("negative", "neutral", "positive"),
+    count = c(
+      length(which(sentiment_final_bing$score < 0)),
+      length(which(sentiment_final_bing$score == 0)),
+      length(which(sentiment_final_bing$score > 0))
+    )
+  )
+)
+
+sentimental_table_bing
+
+bing_plot <- ggplot(sentiment_final_bing, aes(x = score, fill = factor(score >= 0))) +
+  geom_histogram(stat="count") + 
+  geom_density(alpha = 0.2) +
+  ylim(0, 2750) + 
+  #geom_vline(xintercept = 0:5)
+  #geom_vline(xintercept = -3) + 
+  #geom_vline(xintercept = 0) + 
+ #geom_vline(xintercept = 3) +
+  labs(title = "Sentimental Analysis - Bing", x = "Sentimental Score", y = "Frequency") + theme_light()
+```
+
+## --------------------------------- ##
+
+#GETTING SENTIMENT SCORE (AFINN) FOR EACH TWEET - CREATING FUNCTION
+```{r}
+sentiment_afinn = function(twt) {
+  #Step 1: Basic Cleaning
+  twt_tbl = tibble(text = twt) %>%
+    mutate(
+      filteredRT = gsub(("RT"), "", text),
+      stripped_text = gsub(("https://t.co/"), "", filteredRT)
+    ) %>%
+    unnest_tokens(word, stripped_text) %>%
+    anti_join(stop_words) %>%
+    inner_join(get_sentiments("afinn")) %>%
+    count(word, value, sort = TRUE) %>%
+    ungroup() %>%
+  
+  #Step 2: Create Column "score" that assigns a -1 to all negative words, and 1 to positive words
+    mutate(
+      score = case_when(
+        value < 0 ~ n*(-1),
+        value >= 0 ~ n*(1)
+      )
+    )
+  
+  #Step 3: Calculate total score
+  sent.score = case_when(
+    nrow(twt_tbl) == 0 ~ 0,
+    nrow(twt_tbl) > 0 ~ sum(twt_tbl$score)
+  )
+  
+  #Step 4: Keep track of which tweets contained no words from the Bing list
+  zero.type = case_when(
+    nrow(twt_tbl) == 0 ~ "Type 1",
+    nrow(twt_tbl) > 0 ~ "Type 2"
+  )
+  list(score = sent.score, type = zero.type, twt_tbl = twt_tbl)
+}
+```
+
+#GETTING SENTIMENT SCORE (AFINN) FOR EACH TWEET - APPLYING FUNCTION
+```{r}
+applied_sentiment_afinn <- lapply(raw_tweets$text, function(x){sentiment_afinn(x)}) 
+#Will take some time
+
+#applied_sentiment -> DONT RUN THIS, IT WILL MAKE YOUR PC LAG
+```
+
+#TESTING A TWEET - AFINN
+```{r}
+applied_sentiment_afinn[[2022]]
+raw_tweets$text[2022]
+```
+
+#MAKING A HISTOGRAM - AFINN
+```{r}
+sentiment_final_afinn <- bind_rows(
+  tibble(
+    score = unlist(map(applied_sentiment_afinn, "score")),
+    type = unlist(map(applied_sentiment_afinn, "type"))
+  )
+)
+sentiment_final_afinn
+
+sentimental_table_afinn <- bind_rows(
+  tibble(
+    sentiment = c("negative", "neutral", "positive"),
+    count = c(
+      length(which(sentiment_final_afinn$score < 0)),
+      length(which(sentiment_final_afinn$score == 0)),
+      length(which(sentiment_final_afinn$score > 0))
+    )
+  )
+)
+
+sentimental_table_afinn
+
+afinn_plot <- ggplot(sentiment_final_afinn, aes(x = score, fill = factor(score >= 0))) +
+  geom_histogram(stat="count") + 
+  geom_density(alpha = 0.2) +
+  ylim(0, 2750) +
+  #geom_vline(xintercept = 0:5)
+  #geom_vline(xintercept = -3) + 
+  #geom_vline(xintercept = 0) + 
+ #geom_vline(xintercept = 3) +
+  labs(title = "Sentimental Analysis - Afinn", x = "Sentimental Score", y = "Frequency") + theme_light()
+```
+
+#PLOTTING TWO RESULTS FROM TWO LIBRARIES FOR SENTIMENTAL ANALYSIS
+```{r}
+afinn_plot
+bing_plot
+```
